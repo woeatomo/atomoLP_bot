@@ -25,7 +25,8 @@ import {
   createLiveMessage,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal, recordPnlSample } from "./state.js";
+import { lowYieldAgeReached } from "./entry-guards.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
@@ -253,6 +254,13 @@ export async function runManagementCycle({ silent = false } = {}) {
     // confirmation lives in the fast 3s poller below.
     const exitMap = new Map();
     for (const p of positionData) {
+      if (!p.pnl_pct_suspicious) {
+        recordPnlSample(p.position, {
+          pnl_pct: p.pnl_pct,
+          in_range: p.in_range,
+          sampleSec: config.management.pnlPathSampleSec,
+        });
+      }
       confirmPeak(p.position, p.pnl_pct, 1);
       const exit = updatePnlAndCheckExits(p.position, p, config.management);
       if (exit) {
@@ -732,6 +740,13 @@ Summarize the current portfolio health, total fees earned, and performance of al
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
       if (!result?.positions?.length) return;
       for (const p of result.positions) {
+        if (!p.pnl_pct_suspicious) {
+          recordPnlSample(p.position, {
+            pnl_pct: p.pnl_pct,
+            in_range: p.in_range,
+            sampleSec: config.management.pnlPathSampleSec,
+          });
+        }
         confirmPeak(p.position, p.pnl_pct, confirmTicks);
 
         // Detect an exit signal this tick (rule-based exits, then deterministic close rules).
@@ -935,7 +950,7 @@ function getDeterministicCloseRule(position, managementConfig) {
   if (
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
-    (position.age_minutes ?? 0) >= 60
+    lowYieldAgeReached(position.age_minutes, managementConfig.minAgeBeforeYieldCheck)
   ) {
     return { action: "CLOSE", rule: 5, reason: "low yield" };
   }
@@ -1005,6 +1020,8 @@ function formatConfigSnapshot() {
     `OOR: ${config.management.outOfRangeWaitMinutes}m | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
     `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
     `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m`,
+    `Min volatility: ${Number(config.screening.minVolatility) > 0 ? config.screening.minVolatility : "off"} | PnL path sample ${config.management.pnlPathSampleSec}s`,
+    `Re-entry guard: ${config.management.reentryGuardEnabled ? "on" : "off"} | max deploys ${config.management.reentryMaxDeploysPerToken || "off"} | mcap drop ${config.management.reentryMcapDropPct || "off"}% | vol drop ${config.management.reentryVolatilityDropPct || "off"}% | lookback ${config.management.reentryLookbackHours || "all"}h | low-yield streak ${config.management.reentryLowYieldStreak || "off"}`,
     `Screening: ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl}`,
     `Intervals: manage ${config.schedule.managementIntervalMin}m | screen ${config.schedule.screeningIntervalMin}m`,
     `HiveMind: ${isHiveMindEnabled() ? "enabled" : "disabled"}${config.hiveMind.agentId ? ` | ${config.hiveMind.agentId}` : ""}`,

@@ -8,6 +8,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { config } from "./config.js";
+import { evaluateReentryGuard, isLowYieldCloseReason } from "./entry-guards.js";
 
 import { repoPath } from "./repo-root.js";
 
@@ -32,6 +33,10 @@ function load() {
   } catch {
     return {};
   }
+}
+
+export function loadPoolMemory() {
+  return load();
 }
 
 function save(data) {
@@ -137,6 +142,9 @@ export function recordPoolDeploy(poolAddress, deployData) {
     strategy: deployData.strategy || null,
     volatility_at_deploy: deployData.volatility ?? null,
     entry_mcap: deployData.entry_mcap ?? null,
+    min_pnl_pct: deployData.min_pnl_pct ?? null,
+    max_pnl_pct: deployData.max_pnl_pct ?? null,
+    peak_pnl_pct: deployData.peak_pnl_pct ?? null,
     entry_tvl: deployData.entry_tvl ?? null,
     entry_volume: deployData.entry_volume ?? null,
     exit_mcap: deployData.exit_mcap ?? null,
@@ -169,8 +177,9 @@ export function recordPoolDeploy(poolAddress, deployData) {
     entry.base_mint = deployData.base_mint;
   }
 
-  // Set cooldown for low yield closes — pool wasn't profitable enough, don't redeploy soon
-  if (deploy.close_reason === "low yield") {
+  // Set cooldown for low yield closes — pool wasn't profitable enough, don't redeploy soon.
+  // The live exit path stores "Low yield: fee/TVL …", not the exact token "low yield".
+  if (isLowYieldCloseReason(deploy.close_reason)) {
     const cooldownHours = 4;
     const cooldownUntil = setPoolCooldown(entry, cooldownHours, "low yield");
     log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (low yield close)`);
@@ -240,6 +249,34 @@ export function isBaseMintOnCooldown(baseMint) {
     entry?.base_mint_cooldown_until &&
     new Date(entry.base_mint_cooldown_until) > now
   );
+}
+
+export function getReentrySettings(management = config.management) {
+  return {
+    enabled: management?.reentryGuardEnabled === true,
+    maxDeploysPerToken: Number(management?.reentryMaxDeploysPerToken) || 0,
+    mcapDropPct: Number(management?.reentryMcapDropPct) || 0,
+    volatilityDropPct: Number(management?.reentryVolatilityDropPct) || 0,
+    lookbackHours: Number(management?.reentryLookbackHours) || 0,
+    lowYieldStreak: Number(management?.reentryLowYieldStreak) || 0,
+  };
+}
+
+/**
+ * Block a repeat deploy when the opt-in re-entry guard says so.
+ * Pass `db` to avoid re-reading pool-memory.json inside a screening loop.
+ * Returns null when the guard is off or the deploy is allowed.
+ */
+export function getReentryBlockReason(baseMint, { mcap = null, volatility = null, now = Date.now() } = {}, db = null) {
+  const settings = getReentrySettings();
+  if (!settings.enabled || !baseMint) return null;
+  const memory = db || load();
+  const deploys = [];
+  for (const entry of Object.values(memory)) {
+    if (entry?.base_mint !== baseMint || !Array.isArray(entry.deploys)) continue;
+    deploys.push(...entry.deploys);
+  }
+  return evaluateReentryGuard({ baseMint, mcap, volatility, now, deploys, settings });
 }
 
 // ─── Read ──────────────────────────────────────────────────────

@@ -488,6 +488,22 @@ All fields are optional — defaults shown. Edit `user-config.json`.
 | `maxBotHoldersPct` | `30` | Maximum bot holder % (Jupiter audit) |
 | `maxTop10Pct` | `60` | Maximum top-10 holder concentration |
 | `blockedLaunchpads` | `[]` | Launchpad names to never deploy into |
+| `minVolatility` | `0` | Optional minimum pool volatility, in the same units the screener already uses (`max(timeframe, 30m)`). `0` turns the floor off. Pools below the floor are rejected before deploy. |
+
+### Re-entry guard
+
+Off unless `reentryGuardEnabled` is `true` **and** at least one threshold below is greater than `0`. History comes from `pool-memory.json` (closed deploys for that base mint). A missing mcap or volatility does not trip that one rule. `reentryLookbackHours: 0` counts every recorded deploy; any other value counts only deploys inside that window.
+
+| Field | Type | Default | Effect |
+|---|---|---|---|
+| `reentryGuardEnabled` | bool | `false` | Master switch. `false` leaves re-entry behaviour unchanged. |
+| `reentryMaxDeploysPerToken` | number | `0` | Block the next deploy once this many earlier deploys exist for the token. `0` = no cap. |
+| `reentryMcapDropPct` | number | `0` | Block when current mcap is at least this percent below the highest prior entry mcap. `0` = off. |
+| `reentryVolatilityDropPct` | number | `0` | Block when current volatility is at least this percent below the highest prior entry volatility. `0` = off. |
+| `reentryLookbackHours` | number | `0` | How far back those rules look. `0` = all recorded history. |
+| `reentryLowYieldStreak` | number | `0` | Block when the last N closes of this token were all low-yield. `0` = off. |
+
+These add filters. They do not lower `minOrganic`, `maxTop10Pct`, `maxBotHoldersPct`, `excludeHighSupplyConcentration`, or `minTokenFeesSol`.
 
 ### Management
 
@@ -505,6 +521,7 @@ All fields are optional — defaults shown. Edit `user-config.json`.
 | `trailingTriggerPct` | `3` | Activate trailing TP at this PnL % |
 | `trailingDropPct` | `1.5` | Close when PnL drops this % from peak |
 | `strategy` | `bid_ask` | LP strategy: `spot`, `bid_ask`, or `curve` |
+| `pnlPathSampleSec` | `60` | Seconds between PnL samples stored on an open position. A sample is also stored when PnL moves by 0.5 points. The path kept at close is capped at 120 points (first, last, min, max, and evenly spaced fills). `0` stores every observation until that cap. This does not change when a position is closed. |
 
 ### Schedule
 
@@ -567,6 +584,16 @@ node cli.js evolve
 ```
 
 This analyzes closed position performance (win rate, avg PnL, fee yields) and automatically adjusts screening thresholds in `user-config.json`. Changes take effect immediately.
+
+`evolveThresholds` only **raises** `minFeeActiveTvlRatio` (clamp 0.05–10) and `minOrganic` (clamp 60–90). It never lowers them, and it does not change volatility, re-entry, mcap, holder, fee, or supply-concentration floors.
+
+### Replay a saved book
+
+`scripts/backtest-thresholds.js` replays `performance[]` from a lessons file against volatility, fee/TVL, mcap, and re-entry rules. It prints n, win rate, total and mean PnL for each setting. It does not re-simulate take-profit or stop-loss — those need the `pnl_path` stored on closes after this change.
+
+```bash
+node scripts/backtest-thresholds.js path/to/lessons.json
+```
 
 ---
 

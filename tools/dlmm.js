@@ -22,9 +22,11 @@ import {
   getTrackedPosition,
   minutesOutOfRange,
   syncOpenPositions,
+  buildPnlPath,
+  totalMinutesOutOfRange,
 } from "../state.js";
 import { recordPerformance } from "../lessons.js";
-import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
+import { isBaseMintOnCooldown, isPoolOnCooldown, getReentryBlockReason } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { agentMeridianJson, getAgentIdForRequests, getAgentMeridianHeaders } from "./agent-meridian.js";
@@ -495,6 +497,14 @@ export async function deployPosition({
   if (isBaseMintOnCooldown(baseMint)) {
     log("deploy", `Base mint ${baseMint.slice(0, 8)} is on cooldown — skipping deploy for pool ${pool_address.slice(0, 8)}`);
     return { success: false, error: "Token on cooldown — recently closed out-of-range too many times. Try a different token." };
+  }
+  const reentryBlock = getReentryBlockReason(baseMint, {
+    mcap: entry_mcap,
+    volatility: normalizedVolatility,
+  });
+  if (reentryBlock) {
+    log("deploy", `${reentryBlock} — skipping pool ${pool_address.slice(0, 8)}`);
+    return { success: false, error: reentryBlock };
   }
   const activeBin = await pool.getActiveBin();
   const actualBinStep = pool.lbPair.binStep;
@@ -1613,10 +1623,7 @@ export async function closePosition({ position_address, reason }) {
       if (tracked) {
         const deployedAt = new Date(tracked.deployed_at).getTime();
         const minutesHeld = Math.floor((Date.now() - deployedAt) / 60000);
-        let minutesOOR = 0;
-        if (tracked.out_of_range_since) {
-          minutesOOR = Math.floor((Date.now() - new Date(tracked.out_of_range_since).getTime()) / 60000);
-        }
+        const minutesOOR = totalMinutesOutOfRange(tracked);
 
         let pnlUsd = 0;
         let pnlTrueUsd = 0;
@@ -1683,10 +1690,12 @@ export async function closePosition({ position_address, reason }) {
           fees_earned_usd: feesUsd,
           final_value_usd: finalValueUsd,
           initial_value_usd: initialUsd,
-          minutes_in_range: minutesHeld - minutesOOR,
+          minutes_in_range: Math.max(0, minutesHeld - minutesOOR),
           minutes_held: minutesHeld,
           close_reason: reason || "agent decision",
           signal_snapshot: signalSnapshot,
+          deployed_at: tracked.deployed_at || null,
+          pnl_path: buildPnlPath(tracked),
           entry_mcap: tracked.entry_mcap ?? null,
           entry_tvl: tracked.entry_tvl ?? null,
           entry_volume: tracked.entry_volume ?? null,
@@ -1874,11 +1883,7 @@ export async function closePosition({ position_address, reason }) {
     if (tracked) {
       const deployedAt = new Date(tracked.deployed_at).getTime();
       const minutesHeld = Math.floor((Date.now() - deployedAt) / 60000);
-
-      let minutesOOR = 0;
-      if (tracked.out_of_range_since) {
-        minutesOOR = Math.floor((Date.now() - new Date(tracked.out_of_range_since).getTime()) / 60000);
-      }
+      const minutesOOR = totalMinutesOutOfRange(tracked);
 
       const shouldRejectClosedPnl = (pct, closeReasonText) => {
         if (!Number.isFinite(pct)) return false;
@@ -1988,10 +1993,12 @@ export async function closePosition({ position_address, reason }) {
         fees_earned_usd: feesUsd,
         final_value_usd: finalValueUsd,
         initial_value_usd: initialUsd,
-        minutes_in_range: minutesHeld - minutesOOR,
+        minutes_in_range: Math.max(0, minutesHeld - minutesOOR),
         minutes_held: minutesHeld,
         close_reason: reason || "agent decision",
         signal_snapshot: signalSnapshot,
+        deployed_at: tracked.deployed_at || null,
+        pnl_path: buildPnlPath(tracked),
         entry_mcap: tracked.entry_mcap ?? null,
         entry_tvl: tracked.entry_tvl ?? null,
         entry_volume: tracked.entry_volume ?? null,

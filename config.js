@@ -98,6 +98,9 @@ export const config = {
     blockedLaunchpads:  u.blockedLaunchpads  ?? [],  // e.g. ["letsbonk.fun", "pump.fun"]
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
+    // Optional entry floor on pool volatility (same units the screener already
+    // uses: max(timeframe, 30m)). 0 = off, so existing books are unchanged.
+    minVolatility:     numericConfig(u.minVolatility) ?? 0,
   },
 
   // ─── Position Management ────────────────
@@ -115,6 +118,15 @@ export const config = {
     repeatDeployCooldownHours: u.repeatDeployCooldownHours ?? 12,
     repeatDeployCooldownScope: u.repeatDeployCooldownScope ?? "token", // pool | token | both
     repeatDeployCooldownMinFeeEarnedPct: u.repeatDeployCooldownMinFeeEarnedPct ?? u.repeatDeployCooldownMinFeeYieldPct ?? 0,
+    // Opt-in re-entry guard. The master switch defaults off. Each threshold
+    // also defaults to 0 (that rule off). Nothing is blocked until both the
+    // switch and at least one threshold are set.
+    reentryGuardEnabled: u.reentryGuardEnabled ?? false,
+    reentryMaxDeploysPerToken: numericConfig(u.reentryMaxDeploysPerToken) ?? 0,
+    reentryMcapDropPct: numericConfig(u.reentryMcapDropPct) ?? 0,
+    reentryVolatilityDropPct: numericConfig(u.reentryVolatilityDropPct) ?? 0,
+    reentryLookbackHours: numericConfig(u.reentryLookbackHours) ?? 0, // 0 = all recorded history
+    reentryLowYieldStreak: numericConfig(u.reentryLowYieldStreak) ?? 0,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
     stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
@@ -129,6 +141,10 @@ export const config = {
     trailingTriggerPct:    u.trailingTriggerPct    ?? 3,    // activate trailing at X% PnL
     trailingDropPct:       u.trailingDropPct       ?? 1.5,  // close when drops X% from peak
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
+    // Seconds between stored PnL-path samples. Does not change exit rules.
+    // A sample is also stored when PnL moves by >= 0.5 points. Cap is 120.
+    // 0 stores every observation until that cap.
+    pnlPathSampleSec:      numericConfig(u.pnlPathSampleSec) ?? 60,
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
   },
@@ -322,6 +338,7 @@ export function reloadScreeningThresholds() {
     if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
     if (fresh.allowedLaunchpads !== undefined) s.allowedLaunchpads = fresh.allowedLaunchpads;
     if (fresh.blockedLaunchpads !== undefined) s.blockedLaunchpads = fresh.blockedLaunchpads;
+    if (fresh.minVolatility !== undefined) s.minVolatility = numericConfig(fresh.minVolatility) ?? 0;
     const minBinsBelow = numericConfig(fresh.minBinsBelow) ?? config.strategy.minBinsBelow;
     const maxBinsBelow = numericConfig(fresh.maxBinsBelow) ?? numericConfig(fresh.binsBelow) ?? config.strategy.maxBinsBelow;
     const defaultBinsBelow = numericConfig(fresh.defaultBinsBelow) ?? numericConfig(fresh.binsBelow) ?? config.strategy.defaultBinsBelow ?? maxBinsBelow;

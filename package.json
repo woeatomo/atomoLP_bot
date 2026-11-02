@@ -15,8 +15,10 @@
     "pm2:restart": "pm2 restart meridian --update-env",
     "pm2:logs": "pm2 logs meridian --lines 100",
     "dev": "DRY_RUN=true node index.js",
-    "test": "npm run test:syntax",
+    "test": "npm run test:syntax && npm run test:guards",
     "test:syntax": "find . -path ./node_modules -prune -o -name '*.js' -exec node --check {} \\;",
+    "test:guards": "node test/test-entry-guards.js",
+    "backtest": "node scripts/backtest-thresholds.js",
     "test:screen": "node test/test-screening.js",
     "test:agent": "DRY_RUN=true node test/test-agent.js",
     "postinstall": "node scripts/patch-anchor.js"

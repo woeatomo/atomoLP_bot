@@ -2,7 +2,8 @@ import { config } from "../config.js";
 import { isBlacklisted } from "../token-blacklist.js";
 import { isDevBlocked, getBlockedDevs } from "../dev-blocklist.js";
 import { log } from "../logger.js";
-import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
+import { isBaseMintOnCooldown, isPoolOnCooldown, getReentryBlockReason, loadPoolMemory } from "../pool-memory.js";
+import { volatilityFloorRejectReason } from "../entry-guards.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { getAgentMeridianBase, getAgentMeridianHeaders } from "./agent-meridian.js";
 
@@ -168,6 +169,13 @@ function getRawPoolScreeningRejectReason(pool, s) {
   if (!isUsableVolatility(volatility)) {
     return `volatility ${volatility ?? "unknown"} is unusable`;
   }
+  const volatilityFloor = volatilityFloorRejectReason(volatility, s.minVolatility);
+  if (volatilityFloor) return volatilityFloor;
+  const reentryBlock = getReentryBlockReason(getPoolBaseMint(pool), {
+    mcap: numeric(base?.market_cap),
+    volatility,
+  }, s._reentryDb);
+  if (reentryBlock) return reentryBlock;
   if (baseOrganic == null || baseOrganic < s.minOrganic) {
     return `base organic ${baseOrganic ?? "unknown"} below minOrganic ${s.minOrganic}`;
   }
@@ -522,8 +530,9 @@ export async function discoverPools({
   await enrichDiscordSignalLaunchpads(rawPools);
 
   const filteredExamples = [];
+  const screenSettings = config.management.reentryGuardEnabled ? { ...s, _reentryDb: loadPoolMemory() } : s;
   const thresholdedRawPools = rawPools.filter((pool) => {
-    const reason = getRawPoolScreeningRejectReason(pool, s);
+    const reason = getRawPoolScreeningRejectReason(pool, screenSettings);
     if (!reason) return true;
     filteredExamples.push({ name: pool.name || pool.pool_address || "unknown pool", reason });
     if (pool.discord_signal) log("screening", `Discord signal filtered: ${pool.name || pool.pool_address} — ${reason}`);
@@ -606,6 +615,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const minTvl = Number(config.screening.minTvl ?? 0);
   const maxTvl = config.screening.maxTvl == null ? null : Number(config.screening.maxTvl);
   const minFeeActiveTvlRatio = Number(config.screening.minFeeActiveTvlRatio ?? 0);
+  const reentryDb = config.management.reentryGuardEnabled ? loadPoolMemory() : null;
 
   const eligible = pools
     .filter((p) => {
@@ -627,6 +637,11 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         pushFilteredReason(filteredOut, p, `volatility ${p.volatility ?? "unknown"} is unusable`);
         return false;
       }
+      const volatilityFloor = volatilityFloorRejectReason(p.volatility, config.screening.minVolatility);
+      if (volatilityFloor) {
+        pushFilteredReason(filteredOut, p, volatilityFloor);
+        return false;
+      }
       if (occupiedPools.has(p.pool)) {
         pushFilteredReason(filteredOut, p, "already have an open position in this pool");
         return false;
@@ -644,6 +659,17 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         log("screening", `Filtered cooldown token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)})`);
         pushFilteredReason(filteredOut, p, "token cooldown active");
         return false;
+      }
+      if (reentryDb) {
+        const reentryBlock = getReentryBlockReason(p.base?.mint, {
+          mcap: p.mcap,
+          volatility: p.volatility,
+        }, reentryDb);
+        if (reentryBlock) {
+          log("screening", `Filtered re-entry ${p.base?.symbol || p.name}: ${reentryBlock}`);
+          pushFilteredReason(filteredOut, p, reentryBlock);
+          return false;
+        }
       }
       return true;
     })

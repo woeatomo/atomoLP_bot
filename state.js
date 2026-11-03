@@ -104,6 +104,10 @@ export function trackPosition({
     closed_at: null,
     notes: [],
     peak_pnl_pct: 0,
+    min_pnl_pct: null,
+    max_pnl_pct: null,
+    pnl_samples: [],
+    minutes_out_of_range_total: 0,
     pending_peak_pnl_pct: null,
     pending_peak_confirm_count: 0,
     pending_peak_started_at: null,
@@ -134,12 +138,36 @@ export function markOutOfRange(position_address) {
 /**
  * Mark a position as back in range (clears OOR timestamp).
  */
+function closeOorStretch(pos, now = Date.now()) {
+  if (!pos?.out_of_range_since) return;
+  const start = Date.parse(pos.out_of_range_since);
+  if (Number.isFinite(start)) {
+    const mins = Math.max(0, Math.floor((now - start) / 60000));
+    pos.minutes_out_of_range_total = (Number(pos.minutes_out_of_range_total) || 0) + mins;
+  }
+  pos.out_of_range_since = null;
+}
+
+/**
+ * Minutes out of range across every stretch, including the one still open.
+ * Close decisions keep using the current streak (`minutesOutOfRange`).
+ */
+export function totalMinutesOutOfRange(pos, now = Date.now()) {
+  if (!pos) return 0;
+  let total = Number(pos.minutes_out_of_range_total) || 0;
+  if (pos.out_of_range_since) {
+    const start = Date.parse(pos.out_of_range_since);
+    if (Number.isFinite(start)) total += Math.max(0, Math.floor((now - start) / 60000));
+  }
+  return total;
+}
+
 export function markInRange(position_address) {
   const state = load();
   const pos = state.positions[position_address];
   if (!pos) return;
   if (pos.out_of_range_since) {
-    pos.out_of_range_since = null;
+    closeOorStretch(pos);
     save(state);
     log("state", `Position ${position_address} back in range`);
   }
@@ -208,6 +236,131 @@ export function setPositionInstruction(position_address, instruction) {
   save(state);
   log("state", `Position ${position_address} instruction set: ${pos.instruction}`);
   return true;
+}
+
+export const MAX_PNL_SAMPLES = 120;
+
+/**
+ * Keep the first and last sample plus the min and max points, then fill the
+ * remaining slots evenly. Exit backtests need the extremes more than every tick.
+ */
+export function capPnlSamples(samples, max = MAX_PNL_SAMPLES) {
+  if (!Array.isArray(samples) || samples.length <= max) return samples;
+  if (max <= 1) return samples.slice(-1);
+  const keep = new Set([0, samples.length - 1]);
+  let minIdx = 0;
+  let maxIdx = 0;
+  for (let i = 1; i < samples.length; i++) {
+    const pnl = Number(samples[i]?.pnl_pct);
+    if (!Number.isFinite(pnl)) continue;
+    if (pnl < Number(samples[minIdx]?.pnl_pct)) minIdx = i;
+    if (pnl > Number(samples[maxIdx]?.pnl_pct)) maxIdx = i;
+  }
+  keep.add(minIdx);
+  keep.add(maxIdx);
+  const slots = max - keep.size;
+  if (slots > 0) {
+    const unkept = [];
+    for (let i = 0; i < samples.length; i++) {
+      if (!keep.has(i)) unkept.push(i);
+    }
+    if (unkept.length > 0) {
+      for (let k = 0; k < slots; k++) {
+        const idx = Math.min(unkept.length - 1, Math.floor(((k + 0.5) * unkept.length) / slots));
+        keep.add(unkept[idx]);
+      }
+    }
+  }
+  return [...keep].sort((a, b) => a - b).map((i) => samples[i]);
+}
+
+/**
+ * Update min/max PnL and append a periodic sample on a plain position object.
+ * Does not touch the confirmed trailing peak. Returns `{ changed }`.
+ */
+export function applyPnlSample(position, {
+  pnl_pct,
+  in_range = null,
+  now = Date.now(),
+  sampleSec = 60,
+  maxSamples = MAX_PNL_SAMPLES,
+} = {}) {
+  if (!position) return { changed: false };
+  const pnl = Math.round(Number(pnl_pct) * 100) / 100;
+  if (!Number.isFinite(pnl)) return { changed: false };
+
+  let changed = false;
+  if (position.min_pnl_pct == null || pnl < position.min_pnl_pct) {
+    position.min_pnl_pct = pnl;
+    changed = true;
+  }
+  if (position.max_pnl_pct == null || pnl > position.max_pnl_pct) {
+    position.max_pnl_pct = pnl;
+    changed = true;
+  }
+
+  if (!Array.isArray(position.pnl_samples)) position.pnl_samples = [];
+  const last = position.pnl_samples[position.pnl_samples.length - 1];
+  const intervalMs = Math.max(0, Number(sampleSec) || 0) * 1000;
+  const lastTs = last ? Number(last.ts) : NaN;
+  const due = !last || !Number.isFinite(lastTs) || intervalMs === 0 || (now - lastTs) >= intervalMs;
+  const moved = !!last && Math.abs(pnl - Number(last.pnl_pct)) >= 0.5;
+  if (due || moved) {
+    const deployed = Date.parse(position.deployed_at || "");
+    position.pnl_samples.push({
+      ts: now,
+      t: Number.isFinite(deployed) ? Math.max(0, Math.round((now - deployed) / 1000)) : null,
+      pnl_pct: pnl,
+      in_range: in_range == null ? null : Boolean(in_range),
+    });
+    if (position.pnl_samples.length > maxSamples) {
+      position.pnl_samples = capPnlSamples(position.pnl_samples, maxSamples);
+    }
+    changed = true;
+  }
+
+  return {
+    changed,
+    min_pnl_pct: position.min_pnl_pct,
+    max_pnl_pct: position.max_pnl_pct,
+    sample_count: position.pnl_samples.length,
+  };
+}
+
+/**
+ * Persist one PnL observation for an open position. Suspicious or missing
+ * ticks should not be passed in. Sampling does not change exit decisions.
+ */
+export function recordPnlSample(position_address, sample = {}) {
+  const pnl = Number(sample.pnl_pct);
+  if (!position_address || !Number.isFinite(pnl)) return null;
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return null;
+  const result = applyPnlSample(pos, sample);
+  if (result.changed) save(state);
+  return result;
+}
+
+/**
+ * Compact path copied onto the performance record at close.
+ * `peak_pnl_pct` is the confirmed trailing peak. min/max are observed samples.
+ */
+export function buildPnlPath(position) {
+  if (!position) return null;
+  const samples = (Array.isArray(position.pnl_samples) ? position.pnl_samples : []).map((sample) => ({
+    t: sample.t ?? null,
+    pnl_pct: sample.pnl_pct ?? null,
+    in_range: sample.in_range ?? null,
+  }));
+  if (position.min_pnl_pct == null && position.max_pnl_pct == null && samples.length === 0) return null;
+  return {
+    peak_pnl_pct: position.peak_pnl_pct ?? null,
+    max_pnl_pct: position.max_pnl_pct ?? null,
+    min_pnl_pct: position.min_pnl_pct ?? null,
+    sample_count: samples.length,
+    samples,
+  };
 }
 
 /**
@@ -377,7 +530,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     changed = true;
     log("state", `Position ${position_address} marked out of range`);
   } else if (in_range === true && pos.out_of_range_since) {
-    pos.out_of_range_since = null;
+    closeOorStretch(pos);
     changed = true;
     log("state", `Position ${position_address} back in range`);
   }

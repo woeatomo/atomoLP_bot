@@ -175,6 +175,9 @@ export async function recordPerformance(perf) {
       close_reason: perf.close_reason,
       strategy: perf.strategy,
       volatility: perf.volatility,
+      min_pnl_pct: perf.pnl_path?.min_pnl_pct ?? null,
+      max_pnl_pct: perf.pnl_path?.max_pnl_pct ?? null,
+      peak_pnl_pct: perf.pnl_path?.peak_pnl_pct ?? null,
       entry_mcap: perf.entry_mcap,
       entry_tvl: perf.entry_tvl,
       entry_volume: perf.entry_volume,
@@ -325,6 +328,8 @@ function derivLesson(perf) {
 /**
  * Analyze closed position performance and evolve screening thresholds.
  * Writes changes to user-config.json and returns a summary.
+ * Only raises `minFeeActiveTvlRatio` and `minOrganic`. It never lowers a
+ * threshold and it does not touch volatility, re-entry, or safety floors.
  *
  * @param {Array}  perfData - Array of performance records (from lessons.json)
  * @param {Object} config   - Live config object (mutated in place)

@@ -21,6 +21,8 @@ import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
 import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW } from "../config.js";
+import { getReentryBlockReason } from "../pool-memory.js";
+import { volatilityFloorRejectReason } from "../entry-guards.js";
 import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import { execSync, spawn } from "child_process";
@@ -147,6 +149,13 @@ async function validateDeployPoolThresholds(args) {
       reason: `Pool ${volatilityTimeframe} volatility ${volatility ?? "unknown"} is unusable. Refusing deploy.`,
     };
   }
+  const volatilityFloor = volatilityFloorRejectReason(volatility, config.screening.minVolatility);
+  if (volatilityFloor) {
+    return {
+      pass: false,
+      reason: `Pool ${volatilityTimeframe} ${volatilityFloor}. Refusing deploy.`,
+    };
+  }
 
   const actualBinStep = poolDetailBinStep(detail);
   const minStep = numberOrNull(config.screening.minBinStep);
@@ -171,6 +180,11 @@ async function validateDeployPoolThresholds(args) {
     entry_volume: numberOrNull(detail?.volume),
     entry_holders: numberOrNull(detail?.base_token_holders ?? detail?.token_x?.holders),
   };
+  const reentryBlock = getReentryBlockReason(baseMint, {
+    mcap: entryMarketData.entry_mcap,
+    volatility,
+  });
+  if (reentryBlock) return { pass: false, reason: reentryBlock };
 
   return { pass: true, entryMarketData };
 }
@@ -216,6 +230,7 @@ function normalizeConfigValue(key, value) {
     "solMode",
     "darwinEnabled",
     "lpAgentRelayEnabled",
+    "reentryGuardEnabled",
   ]);
   const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads"]);
   const stringKeys = new Set([
@@ -369,6 +384,7 @@ const toolMap = {
       blockedLaunchpads: ["screening", "blockedLaunchpads"],
       minTokenAgeHours: ["screening", "minTokenAgeHours"],
       maxTokenAgeHours: ["screening", "maxTokenAgeHours"],
+      minVolatility: ["screening", "minVolatility"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
       loneCandidateMinDegen: ["screening", "loneCandidateMinDegen"],
       // management
@@ -385,6 +401,13 @@ const toolMap = {
       repeatDeployCooldownHours: ["management", "repeatDeployCooldownHours"],
       repeatDeployCooldownScope: ["management", "repeatDeployCooldownScope"],
       repeatDeployCooldownMinFeeEarnedPct: ["management", "repeatDeployCooldownMinFeeEarnedPct"],
+      reentryGuardEnabled: ["management", "reentryGuardEnabled"],
+      reentryMaxDeploysPerToken: ["management", "reentryMaxDeploysPerToken"],
+      reentryMcapDropPct: ["management", "reentryMcapDropPct"],
+      reentryVolatilityDropPct: ["management", "reentryVolatilityDropPct"],
+      reentryLookbackHours: ["management", "reentryLookbackHours"],
+      reentryLowYieldStreak: ["management", "reentryLowYieldStreak"],
+      pnlPathSampleSec: ["management", "pnlPathSampleSec"],
       minVolumeToRebalance: ["management", "minVolumeToRebalance"],
       stopLossPct: ["management", "stopLossPct"],
       takeProfitPct: ["management", "takeProfitPct"],
